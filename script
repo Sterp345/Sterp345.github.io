@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+trap cleanup SIGINT SIGTERM ERR EXIT
+
+script_dir="/home/Nedopirat/user"
+
+usage() {
+    cat <<EOF
+Usage: $(basename "${BASH_SOURCE[0]}") [-h] [-v] [-i INTERFACE] [-a ADDRESS] [-m MASK] [-g GATEWAY] [-r ROUTE] [-b BRIDGE] [-e ENABLE|DISABLE]
+Script for managing network configuration using netplan.
+Available options:
+-h, --help           Print this help and exit
+-v, --verbose        Print script debug info
+-i, --interface      Network interface name
+-a, --address        IP address to assign
+-m, --mask           Subnet mask
+-g, --gateway        Default gateway
+-r, --route          Static route to add
+-b, --bridge         Create a network bridge
+-e, --enable         Enable or disable interface/bridge
+EOF
+    exit
+}
+
+cleanup() {
+    trap - SIGINT SIGTERM ERR EXIT
+}
+
+msg() {
+    echo >&2 -e "${1-}"
+}
+
+die() {
+    local msg="\$1"
+    local code="${2-1}" # default exit status 1
+    msg "$msg"
+    exit "$code"
+}
+
+parse_params() {
+    interface=''
+    address=''
+    mask=''
+    gateway=''
+    route=''
+    bridge=''
+    enable_disable=''
+
+    while :; do
+        case "${1-}" in
+            -h | --help) usage ;;
+            -v | --verbose) set -x ;;
+            -i | --interface) interface="${2-}"; shift ;;
+            -a | --address) address="${2-}"; shift ;;
+            -m | --mask) mask="${2-}"; shift ;;
+            -g | --gateway) gateway="${2-}"; shift ;;
+            -r | --route) route="${2-}"; shift ;;
+            -b | --bridge) bridge="${2-}"; shift ;;
+            -e | --enable) enable_disable="${2-}"; shift ;;
+            -?*) die "Unknown option: \$1" ;;
+            *) break ;;
+        esac
+        shift
+    done
+
+    # Check required params
+    [[ -z "${interface-}" ]] && die "Missing required parameter: interface"
+    return 0
+}
+
+apply_netplan() {
+    netplan apply
+}
+
+configure_interface() {
+    local config_file="/etc/netplan/50-cloud-init.yaml"
+
+    echo "Configuring interface $interface with address $address, mask $mask, gateway $gateway"
+    {
+        echo "network:"
+        echo "  version: 2"
+        echo "  ethernets:"
+        echo "    $interface:"
+        echo "      dhcp4: no"
+        echo "      addresses: [$address/$mask]"
+        echo "      gateway4: $gateway"
+        echo "      routes:"
+        echo "        - to: $route"
+        echo "          via: $gateway"
+    } > "$config_file"
+
+    apply_netplan
+}
+
+create_bridge() {
+    local config_file="/etc/netplan/50-cloud-init.yaml"
+
+    echo "Creating bridge $bridge"
+    {
+        echo "network:"
+        echo "  version: 2"
+        echo "  bridges:"
+        echo "    $bridge:"
+        echo "      interfaces: [$interface]"
+        echo "      dhcp4: no"
+    } > "$config_file"
+
+    apply_netplan
+}
+
+enable_disable_interface() {
+    if [[ "$enable_disable" == "ENABLE" ]]; then
+        ip link set "$interface" up
+        msg "Interface $interface enabled"
+    elif [[ "$enable_disable" == "DISABLE" ]]; then
+        ip link set "$interface" down
+        msg "Interface $interface disabled"
+    else
+        die "Invalid option for enable/disable: $enable_disable"
+    fi
+}
+
+parse_params "$@"
+
+# Main script logic
+if [[ -n "$address" ]]; then
+    configure_interface
+fi
+
+if [[ -n "$bridge" ]]; then
+    create_bridge
+fi
+
+if [[ -n "$enable_disable" ]]; then
+    enable_disable_interface
+fi
